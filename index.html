@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>電子公文書XML+XSLプレビュー＆変換ツール</title>
+    <!-- JSZip from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --bg-color: #f8fafc;
+            --text-color: #334155;
+            --border-color: #e2e8f0;
+        }
+
+        body {
+            font-family: "Helvetica Neue", Arial, "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            margin: 0 0 10px 0;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            gap: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        /* Drag & Drop Zone */
+        #drop-zone {
+            border: 2px dashed var(--border-color);
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            background-color: #fff;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+
+        #drop-zone.dragover {
+            border-color: var(--primary-color);
+            background-color: #eff6ff;
+        }
+
+        #drop-zone p {
+            margin: 0;
+            font-size: 1.1rem;
+            color: #64748b;
+        }
+
+        /* Controls */
+        .controls {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            display: none;
+            /* Hidden by default */
+        }
+
+        button {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        button:hover {
+            background-color: #1d4ed8;
+        }
+
+        /* Preview Area */
+        #preview-container {
+            flex: 1;
+            background: #fff;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+            display: none;
+            /* Hidden by default */
+        }
+
+        iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+
+        /* Loading */
+        #loading {
+            display: none;
+            text-align: center;
+            margin: 10px 0;
+            color: var(--primary-color);
+        }
+
+        /* Error Message */
+        #error-msg {
+            color: #ef4444;
+            text-align: center;
+            margin-top: 10px;
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <h1>電子公文書XML+XSLプレビュー＆変換ツール</h1>
+        <p>XMLとXSLを含むZIPファイルをここにドラッグ＆ドロップしてください</p>
+    </header>
+
+    <div class="container">
+        <div id="drop-zone">
+            <p>ここにZIPファイルをドロップ<br>またはクリックしてファイルを選択</p>
+            <input type="file" id="file-input" accept=".zip" style="display: none;">
+        </div>
+
+        <div id="loading">処理中...</div>
+        <div id="error-msg"></div>
+
+        <div class="controls" id="controls">
+            <button id="download-btn">PDFとして保存 (印刷)</button>
+        </div>
+
+        <div id="preview-container">
+            <iframe id="preview-frame"></iframe>
+        </div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const previewContainer = document.getElementById('preview-container');
+        const previewFrame = document.getElementById('preview-frame');
+        const controls = document.getElementById('controls');
+        const downloadBtn = document.getElementById('download-btn');
+        const loading = document.getElementById('loading');
+        const errorMsg = document.getElementById('error-msg');
+
+        // Drag & Drop Handling
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        dropZone.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        async function handleFile(file) {
+            if (!file.name.endsWith('.zip')) {
+                showError('ZIPファイルを選択してください。');
+                return;
+            }
+
+            showLoading(true);
+            hideError();
+            resetPreview();
+
+            try {
+                const zip = await JSZip.loadAsync(file);
+                const files = Object.keys(zip.files);
+
+                // Find all XML files
+                const xmlFiles = files.filter(f => f.toLowerCase().endsWith('.xml')).sort();
+
+                if (xmlFiles.length === 0) {
+                    throw new Error('ZIPファイル内にXMLファイルが見つかりません。');
+                }
+
+                console.log(`Found ${xmlFiles.length} XML files:`, xmlFiles);
+
+                let combinedHtmlBody = '';
+
+                for (const xmlPath of xmlFiles) {
+                    try {
+                        console.log(`Processing ${xmlPath}...`);
+                        const xmlText = await zip.file(xmlPath).async('text');
+
+                        // Parse XML to find stylesheet
+                        const parser = new DOMParser();
+                        const xmlDoc = parser.parseFromString(xmlText, "application/xml");
+
+                        // Find xml-stylesheet directive
+                        let xslPath = null;
+
+                        // Try XPath looking for processing-instruction
+                        const xpathResult = xmlDoc.evaluate(
+                            "//processing-instruction('xml-stylesheet')",
+                            xmlDoc, null, XPathResult.STRING_TYPE, null
+                        );
+
+                        if (xpathResult.stringValue) {
+                            // Parse href="..." from the string
+                            const hrefMatch = xpathResult.stringValue.match(/href=["'](.*?)["']/);
+                            if (hrefMatch) {
+                                // Resolve path relative to xmlPath
+                                xslPath = resolvePath(xmlPath, hrefMatch[1]);
+                            }
+                        }
+
+                        // Fallback: search for XSL in the same directory or literally anywhere if only one exists
+                        if (!xslPath || !zip.file(xslPath)) {
+                            console.warn(`Directly linked XSL not found for ${xmlPath}, searching fallback...`);
+                            // Look for any XSL in the same folder
+                            const folder = xmlPath.substring(0, xmlPath.lastIndexOf('/') + 1);
+                            const sameFolderXsl = files.find(f => f.startsWith(folder) && f.endsWith('.xsl'));
+                            if (sameFolderXsl) {
+                                xslPath = sameFolderXsl;
+                            } else {
+                                // Last resort: find ANY xsl
+                                xslPath = files.find(f => f.endsWith('.xsl'));
+                            }
+                        }
+
+                        if (!xslPath || !zip.file(xslPath)) {
+                            console.error(`Skipping ${xmlPath}: No XSL found.`);
+                            continue;
+                        }
+
+                        const xslText = await zip.file(xslPath).async('text');
+                        const fragmentHtml = await transformXmlXslToFragment(xmlDoc, xslText);
+
+                        combinedHtmlBody += `<div class="doc-wrapper">${fragmentHtml}</div>`;
+
+                    } catch (e) {
+                        console.error(`Error processing ${xmlPath}:`, e);
+                        combinedHtmlBody += `<div class="error-wrapper">Error processing ${xmlPath}: ${e.message}</div>`;
+                    }
+                }
+
+                if (!combinedHtmlBody) {
+                    throw new Error('変換できるドキュメントがありませんでした。');
+                }
+
+                showPreview(wrapHtml(combinedHtmlBody));
+
+            } catch (err) {
+                console.error(err);
+                showError('処理中にエラーが発生しました: ' + err.message);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function resolvePath(basePath, relativePath) {
+            const stack = basePath.split('/');
+            stack.pop(); // remove filename
+
+            const parts = relativePath.split('/');
+            for (const part of parts) {
+                if (part === '.') continue;
+                if (part === '..') {
+                    if (stack.length > 0) stack.pop();
+                } else {
+                    stack.push(part);
+                }
+            }
+            return stack.join('/');
+        }
+
+        async function transformXmlXslToFragment(xmlDoc, xslString) {
+            const parser = new DOMParser();
+            const xslDoc = parser.parseFromString(xslString, "application/xml");
+
+            if (xslDoc.getElementsByTagName("parsererror").length > 0) throw new Error("XSL Parsing Error");
+
+            const xsltProcessor = new XSLTProcessor();
+            xsltProcessor.importStylesheet(xslDoc);
+
+            const resultDocument = xsltProcessor.transformToFragment(xmlDoc, document);
+            const serializer = new XMLSerializer();
+            return serializer.serializeToString(resultDocument);
+        }
+
+        function wrapHtml(bodyContent) {
+            // Inject Styles for better layout (Screen & Print)
+            const extraStyle = `
+            <style>
+                /* Global overrides */
+                html {
+                    width: 100%;
+                    height: 100%;
+                }
+                body {
+                    width: 100%;
+                    min-height: 100%;
+                    margin: 0;
+                    padding: 20px;
+                    box-sizing: border-box;
+                    background-color: white;
+                    
+                    /* Center content on screen */
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                }
+                
+                /* Document Wrapper - simulates A4 paper on screen */
+                .doc-wrapper {
+                    width: 100%;
+                    max-width: 210mm; /* A4 width */
+                    margin: 0 auto 40px auto;
+                    padding: 20px; /* Internal padding like margins */
+                    background-color: white;
+                    box-sizing: border-box;
+                    
+                    /* Page break logic */
+                    page-break-after: always;
+                }
+                .doc-wrapper:last-child {
+                    margin-bottom: 0;
+                    page-break-after: auto;
+                }
+
+                /* Content Centering & Resizing */
+                body > *, #main, .container {
+                     /* Reset structural constraints from XSL if any */
+                }
+
+                /* Center tables and ensure they fit */
+                table {
+                    margin-left: auto !important;
+                    margin-right: auto !important;
+                    max-width: 100% !important;
+                    /* width: 100% !important;  <-- Optional: force full width vs center natural width */
+                }
+
+                /* Print specific settings */
+                @media print {
+                    @page {
+                        size: A4;
+                        margin: 10mm;
+                    }
+                    body {
+                        display: block; /* Reset flex */
+                        padding: 0;
+                        background-color: transparent;
+                    }
+                    .doc-wrapper {
+                        width: 100% !important;
+                        max-width: 100% !important;
+                        margin: 0;
+                        padding: 0; /* Let @page margin handle it, or keep some? */
+                        box-shadow: none;
+                        border: none;
+                    }
+                    
+                    /* Printing Mechanics */
+                    .doc-wrapper {
+                        page-break-after: always;
+                    }
+                    .doc-wrapper:last-child {
+                        page-break-after: auto;
+                    }
+
+                    p, h1, h2, h3, h4, h5, h6, ul, ol, li, table, tr, th, td, figure, img {
+                        page-break-inside: avoid;
+                        break-inside: avoid;
+                    }
+                    
+                    table {
+                        border-collapse: collapse;
+                        page-break-inside: auto;
+                    }
+                    tr {
+                        page-break-inside: avoid;
+                        page-break-after: auto;
+                    }
+                    td, th {
+                        word-break: break-all;
+                    }
+                    
+                    /* Hide non-print elements just in case */
+                    .no-print { display: none !important; }
+                }
+            </style>`;
+            return `<!DOCTYPE html><html><head><meta charset="utf-8">${extraStyle}</head><body>${bodyContent}</body></html>`;
+        }
+
+        function showPreview(htmlContent) {
+            previewContainer.style.display = 'block';
+            controls.style.display = 'flex';
+
+            // Writing to iframe
+            const doc = previewFrame.contentWindow.document;
+            doc.open();
+            doc.write(htmlContent);
+            doc.close();
+        }
+
+        function resetPreview() {
+            previewContainer.style.display = 'none';
+            controls.style.display = 'none';
+            // Clear iframe
+            const doc = previewFrame.contentWindow.document;
+            doc.open();
+            doc.write('');
+            doc.close();
+        }
+
+        function showLoading(isLoading) {
+            loading.style.display = isLoading ? 'block' : 'none';
+        }
+
+        function showError(msg) {
+            errorMsg.innerText = msg;
+            errorMsg.style.display = 'block';
+        }
+
+        function hideError() {
+            errorMsg.style.display = 'none';
+        }
+
+        // Download/Print Action
+        downloadBtn.addEventListener('click', () => {
+            // Focus and print the iframe window
+            previewFrame.contentWindow.focus();
+            previewFrame.contentWindow.print();
+        });
+
+    </script>
+</body>
+
+</html>

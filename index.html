@@ -127,6 +127,34 @@
             margin-top: 10px;
             display: none;
         }
+
+        /* Disclaimer */
+        .disclaimer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #e2e8f0;
+            text-align: center;
+            font-size: 0.8rem;
+            color: #94a3b8;
+            line-height: 1.5;
+        }
+
+        /* Utility */
+        .no-print {
+            /* Handled in injected print CSS potentially, but good to have here too for screen responsive hiding if needed? 
+               Actually the injected CSS handles .no-print inside the iframe, but this is outside the iframe. 
+               We need a main page print style block or rely on the fact that only iframe is printed?
+               Wait, the user clicks "Download PDF" which prints the IFRAME window. 
+               The Main Window (index.html) is NOT printed usually.
+               BUT if the user presses Ctrl+P on the main page, we should hide it.
+            */
+        }
+
+        @media print {
+            .no-print {
+                display: none !important;
+            }
+        }
     </style>
 </head>
 
@@ -153,6 +181,11 @@
         <div id="preview-container">
             <iframe id="preview-frame"></iframe>
         </div>
+
+        <footer class="disclaimer no-print">
+            <p>免責事項：本ツールは、公的機関が発行する電子公文書をブラウザ上でプレビューし、PDFとして保存するための補助的なツールです。本ツールによって生成されたPDFの正確性、完全性、または法的有効性を保証するものではありません。公的機関が提供する公式な電子公文書またはその表示方法を代替するものではありません。本ツールの使用により生じたいかなる損害についても、開発者は責任を負いません。
+            </p>
+        </footer>
     </div>
 
     <script>

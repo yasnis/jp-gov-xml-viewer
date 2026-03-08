@@ -171,13 +171,13 @@
 
     <header>
         <h1>電子公文書ビューワー | jp-gov-xml-viewer</h1>
-        <p>XMLとXSLを含むZIPファイルをここにドラッグ＆ドロップしてください</p>
+        <p>XMLとXSLを含むZIPファイル、またはXMLファイルをドラッグ＆ドロップしてください</p>
     </header>
 
     <div class="container">
         <div id="drop-zone">
-            <p>ここにZIPファイルをドロップ<br>またはクリックしてファイルを選択</p>
-            <input type="file" id="file-input" accept=".zip" style="display: none;">
+            <p>ここにZIP / XMLファイルをドロップ<br>またはクリックしてファイルを選択</p>
+            <input type="file" id="file-input" accept=".zip,.xml" style="display: none;">
         </div>
 
         <div id="loading">処理中...</div>
@@ -237,8 +237,9 @@
         });
 
         async function handleFile(file) {
-            if (!file.name.endsWith('.zip')) {
-                showError('ZIPファイルを選択してください。');
+            const fileName = file.name.toLowerCase();
+            if (!fileName.endsWith('.zip') && !fileName.endsWith('.xml')) {
+                showError('ZIPファイルまたはXMLファイルを選択してください。');
                 return;
             }
 
@@ -247,6 +248,79 @@
             resetPreview();
 
             try {
+                if (fileName.endsWith('.xml')) {
+                    await handleXmlFile(file);
+                } else {
+                    await handleZipFile(file);
+                }
+            } catch (err) {
+                console.error(err);
+                showError('処理中にエラーが発生しました: ' + err.message);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        async function handleXmlFile(file) {
+            const xmlText = await file.text();
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(xmlText, "application/xml");
+
+            if (xmlDoc.getElementsByTagName("parsererror").length > 0) {
+                throw new Error('XMLファイルの解析に失敗しました。');
+            }
+
+            // Extract XSL URL from <?xml-stylesheet?>
+            const xslUrl = extractStylesheetUrl(xmlText);
+            if (!xslUrl) {
+                throw new Error('XMLファイル内にスタイルシート指定（<?xml-stylesheet?>）が見つかりません。');
+            }
+
+            console.log(`Fetching XSL from: ${xslUrl}`);
+            const xslText = await fetchXsl(xslUrl);
+            const fragmentHtml = await transformXmlXslToFragment(xmlDoc, xslText);
+            const combinedHtmlBody = `<div class="doc-wrapper">${fragmentHtml}</div>`;
+            showPreview(wrapHtml(combinedHtmlBody));
+        }
+
+        function extractStylesheetUrl(xmlText) {
+            // Match <?xml-stylesheet ... href="..." ?>
+            const piMatch = xmlText.match(/<\?xml-stylesheet\s[^?]*href=["'](.*?)["'][^?]*\?>/);
+            return piMatch ? piMatch[1] : null;
+        }
+
+        async function fetchXsl(url) {
+            // Try direct fetch first
+            try {
+                const resp = await fetch(url);
+                if (resp.ok) {
+                    return await resp.text();
+                }
+            } catch (e) {
+                console.warn('Direct fetch failed, trying CORS proxy...', e);
+            }
+
+            // Try CORS proxies as fallback
+            const proxies = [
+                `https://corsproxy.io/?${encodeURIComponent(url)}`,
+                `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+            ];
+
+            for (const proxyUrl of proxies) {
+                try {
+                    const resp = await fetch(proxyUrl);
+                    if (resp.ok) {
+                        return await resp.text();
+                    }
+                } catch (e) {
+                    console.warn(`Proxy failed: ${proxyUrl}`, e);
+                }
+            }
+
+            throw new Error(`XSLファイルの取得に失敗しました。CORSの制約により外部URLからの取得がブロックされた可能性があります。\nURL: ${url}`);
+        }
+
+        async function handleZipFile(file) {
                 const zip = await JSZip.loadAsync(file);
                 const files = Object.keys(zip.files);
 
@@ -291,6 +365,22 @@
                         // Fallback: search for XSL in the same directory or literally anywhere if only one exists
                         if (!xslPath || !zip.file(xslPath)) {
                             console.warn(`Directly linked XSL not found for ${xmlPath}, searching fallback...`);
+
+                            // If the href was a URL, try fetching it
+                            if (xpathResult.stringValue) {
+                                const hrefMatch = xpathResult.stringValue.match(/href=["'](.*?)["']/);
+                                if (hrefMatch && hrefMatch[1].startsWith('http')) {
+                                    try {
+                                        const xslText = await fetchXsl(hrefMatch[1]);
+                                        const fragmentHtml = await transformXmlXslToFragment(xmlDoc, xslText);
+                                        combinedHtmlBody += `<div class="doc-wrapper">${fragmentHtml}</div>`;
+                                        continue;
+                                    } catch (e) {
+                                        console.warn(`Failed to fetch XSL from URL for ${xmlPath}:`, e);
+                                    }
+                                }
+                            }
+
                             // Look for any XSL in the same folder
                             const folder = xmlPath.substring(0, xmlPath.lastIndexOf('/') + 1);
                             const sameFolderXsl = files.find(f => f.startsWith(folder) && f.endsWith('.xsl'));
@@ -323,13 +413,6 @@
                 }
 
                 showPreview(wrapHtml(combinedHtmlBody));
-
-            } catch (err) {
-                console.error(err);
-                showError('処理中にエラーが発生しました: ' + err.message);
-            } finally {
-                showLoading(false);
-            }
         }
 
         function resolvePath(basePath, relativePath) {
@@ -358,8 +441,60 @@
             xsltProcessor.importStylesheet(xslDoc);
 
             const resultDocument = xsltProcessor.transformToFragment(xmlDoc, document);
+            // Fix forms: remove broken onsubmit, enable buttons, open in new tab
+            fixForms(resultDocument);
+            // Linkify plain-text URLs that are not already inside <a> tags
+            linkifyTextNodes(resultDocument);
             const serializer = new XMLSerializer();
             return serializer.serializeToString(resultDocument);
+        }
+
+        function fixForms(node) {
+            const forms = node.querySelectorAll('form[action]');
+            for (const form of forms) {
+                // Open in new tab so the iframe doesn't navigate away
+                form.setAttribute('target', '_blank');
+                // Remove onsubmit handlers that call non-existent functions
+                form.removeAttribute('onsubmit');
+                // Enable all disabled inputs/buttons
+                form.querySelectorAll('[disabled]').forEach(el => el.removeAttribute('disabled'));
+            }
+        }
+
+        function linkifyTextNodes(node) {
+            const urlPattern = /https?:\/\/[^\s<>"'）」]+/g;
+            const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, null);
+            const textNodes = [];
+            while (walker.nextNode()) {
+                textNodes.push(walker.currentNode);
+            }
+            for (const textNode of textNodes) {
+                // Skip if already inside an <a> tag
+                if (textNode.parentElement && textNode.parentElement.closest('a')) continue;
+                const text = textNode.textContent;
+                if (!urlPattern.test(text)) continue;
+                urlPattern.lastIndex = 0;
+
+                const frag = document.createDocumentFragment();
+                let lastIndex = 0;
+                let match;
+                while ((match = urlPattern.exec(text)) !== null) {
+                    if (match.index > lastIndex) {
+                        frag.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+                    }
+                    const a = document.createElement('a');
+                    a.href = match[0];
+                    a.textContent = match[0];
+                    a.target = '_blank';
+                    a.rel = 'noopener noreferrer';
+                    frag.appendChild(a);
+                    lastIndex = urlPattern.lastIndex;
+                }
+                if (lastIndex < text.length) {
+                    frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+                }
+                textNode.parentNode.replaceChild(frag, textNode);
+            }
         }
 
         function wrapHtml(bodyContent) {
